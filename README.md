@@ -61,6 +61,8 @@ jupyter notebook notebooks/lab11_guardrails_hitl.ipynb
 ```bash
 cd src/
 pip install -r ../requirements.txt
+export OPEN_API_KEY="your-api-key-here"
+or
 export GOOGLE_API_KEY="your-api-key-here"
 
 # Run the full lab
