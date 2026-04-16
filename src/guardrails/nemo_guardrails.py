@@ -3,6 +3,9 @@ Lab 11 — Part 2C: NeMo Guardrails
   TODO 9: Define Colang rules for banking safety
 """
 import textwrap
+from google.genai import types
+from google.adk.plugins import base_plugin
+from google.adk.agents.invocation_context import InvocationContext
 
 try:
     from nemoguardrails import RailsConfig, LLMRails
@@ -202,6 +205,72 @@ async def test_nemo_guardrails():
             print(f"  User: {msg}")
             print(f"  Error: {e}")
             print()
+
+
+class NemoGuardPlugin(base_plugin.BasePlugin):
+    """Wraps NeMo Guardrails as an ADK BasePlugin."""
+
+    def __init__(self, colang_content=None, yaml_content=None):
+        super().__init__(name="nemo_guard")
+        self.rails = None
+        self.total_count = 0
+        self.blocked_count = 0
+        try:
+            if NEMO_AVAILABLE:
+                from nemoguardrails import RailsConfig, LLMRails
+                config = RailsConfig.from_content(
+                    yaml_content=yaml_content or NEMO_YAML_CONFIG, 
+                    colang_content=colang_content or COLANG_CONFIG
+                )
+                self.rails = LLMRails(config)
+                print("NeMo Guardrails Plugin initialized.")
+        except Exception as e:
+            print(f"NeMo init failed: {e}")
+
+    def _extract_text(self, user_message) -> str:
+        """Extract plain text from types.Content or str."""
+        if isinstance(user_message, str):
+            return user_message
+        text = ""
+        if user_message and hasattr(user_message, "parts") and user_message.parts:
+            for part in user_message.parts:
+                if hasattr(part, "text") and part.text:
+                    text += part.text
+        return text
+
+    async def on_user_message_callback(
+        self, 
+        *, 
+        invocation_context: InvocationContext, 
+        user_message: types.Content, 
+        **kwargs
+    ) -> types.Content | None:
+        """Call NeMo to check the user message."""
+        if self.rails is None:
+            return None  # Skip if not available
+
+        self.total_count += 1
+        text = self._extract_text(user_message)
+
+        try:
+            result = await self.rails.generate_async(messages=[{
+                "role": "user",
+                "content": text,
+            }])
+            
+            # NeMo returns a dict or content string.
+            response_text = result.get("content", "") if isinstance(result, dict) else str(result)
+            
+            if response_text and response_text.strip():
+                self.blocked_count += 1
+                return types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text=response_text)],
+                )
+        except Exception as e:
+            print(f"NeMo execution error: {e}")
+
+        return None
 
 
 if __name__ == "__main__":

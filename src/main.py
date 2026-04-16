@@ -80,36 +80,41 @@ async def part2_guardrails():
 async def part3_testing():
     """Part 3: Before/after comparison + security pipeline."""
     print("\n" + "=" * 60)
-    print("PART 3: Testing Pipeline")
+    print("PART 3: Testing Pipeline (Production Defense)")
     print("=" * 60)
 
     from testing.testing import run_comparison, print_comparison, SecurityTestPipeline
     from agents.agent import create_unsafe_agent, create_protected_agent
-    from core.monitoring import AuditLogPlugin, MonitoringService
+    from core.monitoring import AuditLogPlugin, MonitoringAlert
     from guardrails.input_guardrails import InputGuardrailPlugin
     from guardrails.output_guardrails import OutputGuardrailPlugin, _init_judge
+    from guardrails.rate_limit import RateLimitPlugin
+    from guardrails.nemo_guardrails import NemoGuardPlugin
 
-    # Initialize Audit Log
+    # Initialize Audit Log & Monitoring
     audit_plugin = AuditLogPlugin(log_path="security_audit.json")
-    monitoring = MonitoringService(audit_plugin)
+    monitoring = MonitoringAlert(audit_plugin)
 
     # TODO 10: Before vs after comparison
     print("\n--- TODO 10: Before/After Comparison ---")
-    unprotected, protected_results = await run_comparison(audit_plugin=audit_plugin)
-    if unprotected and protected_results:
-        print_comparison(unprotected, protected_results)
-    else:
-        print("Complete TODO 10 to see the comparison.")
+    try:
+        unprotected, protected_results = await run_comparison(audit_plugin=audit_plugin)
+        if unprotected and protected_results:
+            print_comparison(unprotected, protected_results)
+    except Exception as e:
+        print(f"Comparison skipped or failed: {e}")
 
     # TODO 11: Automated security pipeline
-    print("\n--- TODO 11: Security Test Pipeline ---")
+    print("\n--- TODO 11: Production Security Test Pipeline ---")
     _init_judge()
     
-    # Create protected agent with FULL pipeline for the final test
+    # Create protected agent with FULL pipeline (5 layers)
     plugins = [
-        InputGuardrailPlugin(),
-        OutputGuardrailPlugin(use_llm_judge=True),
-        audit_plugin
+        RateLimitPlugin(max_requests=10, window_seconds=60), # 1. Rate Limit
+        NemoGuardPlugin(),                                   # 2. NeMo Guardrails
+        InputGuardrailPlugin(),                              # 3. Input Guardrail
+        OutputGuardrailPlugin(use_llm_judge=True, strictness="high"), # 4. LLM Judge
+        audit_plugin                                         # 5. Audit Logging
     ]
     agent, runner = create_protected_agent(plugins=plugins)
     
@@ -118,7 +123,9 @@ async def part3_testing():
     
     if results:
         pipeline.print_report(results)
-        monitoring.check_alerts() # Trigger alert if block rate > 30%
+        # Evaluation and Alerting
+        print("\n[SECURITY MONITORING REPORT]")
+        monitoring.evaluate_metrics() 
     else:
         print("Complete TODO 11 to see the pipeline report.")
 

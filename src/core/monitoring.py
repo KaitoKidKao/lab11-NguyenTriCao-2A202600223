@@ -55,12 +55,11 @@ class AuditLogPlugin(base_plugin.BasePlugin):
                 output_text = self._extract_text(llm_response)
                 
                 # Identify if it was blocked by our guardrails
-                is_blocked = any(msg in output_text for msg in [
-                    "Security Alert", 
-                    "I'm a VinBank assistant and can only help with banking",
-                    "cannot provide that information",
-                    "quality standards"
-                ])
+                block_reasons = []
+                if "Security Alert" in output_text: block_reasons.append("RateLimit/InputGuard")
+                if "can only help with banking" in output_text: block_reasons.append("NeMo/Out-of-Scope")
+                if "cannot provide that information" in output_text: block_reasons.append("OutputGuard/Judge")
+                if "quality standards" in output_text: block_reasons.append("OutputGuard/Judge")
 
                 log_entry = {
                     "timestamp": info["timestamp"],
@@ -69,7 +68,8 @@ class AuditLogPlugin(base_plugin.BasePlugin):
                     "user_message": info["input"],
                     "response": output_text,
                     "latency_ms": round(latency, 2),
-                    "blocked": is_blocked
+                    "blocked": len(block_reasons) > 0,
+                    "block_reasons": block_reasons
                 }
                 self.logs.append(log_entry)
                 self._save_logs()
@@ -86,28 +86,54 @@ class AuditLogPlugin(base_plugin.BasePlugin):
         except Exception as e:
             print(f"Failed to save logs: {e}")
 
-class MonitoringService:
-    """Monitors audit logs and fires alerts when safety thresholds are exceeded."""
+class MonitoringAlert:
+    """Specialized monitoring service that tracks specific security metrics."""
     
-    def __init__(self, audit_plugin: AuditLogPlugin, block_threshold=0.3):
+    def __init__(self, audit_plugin: AuditLogPlugin):
         self.audit_plugin = audit_plugin
-        self.block_threshold = block_threshold
-        self.last_alert_time = 0
+        self.thresholds = {
+            "block_rate": 0.4,       # Alert if > 40% blocked in last window
+            "latency_p95": 5000,    # Alert if p95 latency > 5s
+            "rate_limit_hits": 3     # Alert if > 3 rate limit blocks in last window
+        }
+        self.alert_history = []
 
-    def check_alerts(self):
-        """Check the last 10 requests and fire an alert if block rate is too high."""
-        recent_logs = self.audit_plugin.logs[-10:]
-        if len(recent_logs) < 5:
-            return  # Not enough data for alerting
+    def evaluate_metrics(self, window_size=10):
+        """Analyze recent logs and fire alerts if thresholds are exceeded."""
+        recent = self.audit_plugin.logs[-window_size:]
+        if len(recent) < 5:
+            return []
 
-        block_count = sum(1 for log in recent_logs if log["blocked"])
-        block_rate = block_count / len(recent_logs)
+        active_alerts = []
+        
+        # 1. Block Rate
+        blocked = [l for l in recent if l["blocked"]]
+        block_rate = len(blocked) / len(recent)
+        if block_rate > self.thresholds["block_rate"]:
+            active_alerts.append(f"CRITICAL: High Block Rate ({block_rate:.0%})")
 
-        if block_rate > self.block_threshold:
-            print("\n" + "!" * 60)
-            print(f"[SECURITY ALERT] High block rate detected: {block_rate:.0%}")
-            print(f"Timestamp: {datetime.now().isoformat()}")
-            print(f"Action: Consider investigating session {recent_logs[-1]['session_id'] or 'N/A'}")
-            print("!" * 60 + "\n")
-            return True
-        return False
+        # 2. Rate Limit Hits
+        rl_hits = sum(1 for l in blocked if "RateLimit" in str(l.get("block_reasons", "")))
+        if rl_hits >= self.thresholds["rate_limit_hits"]:
+            active_alerts.append(f"WARNING: Potential DoS Attack (Rate limit hits: {rl_hits})")
+
+        # 3. Latency
+        latencies = sorted([l["latency_ms"] for l in recent])
+        p95 = latencies[int(len(latencies) * 0.95)]
+        if p95 > self.thresholds["latency_p95"]:
+            active_alerts.append(f"PERFORMANCE: High p95 Latency ({p95:.0f}ms)")
+
+        if active_alerts:
+            self._fire_alerts(active_alerts)
+        
+        return active_alerts
+
+    def _fire_alerts(self, alerts):
+        """Console output for alerts (mocking a real alerting system)."""
+        print("\n" + "!" * 60)
+        print("SEC-OPS ALERT DASHBOARD")
+        print(f"Timestamp: {datetime.now().strftime('%H:%M:%S')}")
+        for alert in alerts:
+            print(f" >> {alert}")
+        print("!" * 60 + "\n")
+        self.alert_history.extend(alerts)
